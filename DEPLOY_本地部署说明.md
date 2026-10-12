@@ -218,6 +218,33 @@ SRT 时间码语法严格（`HH:MM:SS,mmm`，**必须逗号**、**必须补零�
 
 ---
 
+## 四·补 3、🎥 旁白视频合成：Web 端样式与音量设置
+
+「合成旁白视频」区域除了语音引擎和"保留原声"开关，还提供这些设置（点 `🎥 开始烧录字幕+旁白` 时生效）：
+
+| 界面控件 | 范围 | 默认 | 对应 `burner.burn_subtitles_with_tts()` 参数 |
+|---|---|---|---|
+| 🔠 字幕大小 | 8 ~ 96 | 20 | `font_size`（ASS 字号，受 PlayRes 缩放） |
+| 📍 字幕位置 | 底部居中/靠左/靠右、画面正中、顶部居中 | 底部居中 | `subtitle_position` |
+| 🔤 字体 | 下拉 + 可手输 | Microsoft YaHei | `font_name` |
+| 🎬 视频原声音量 | 0 ~ 2.0 | 0.5 | `original_volume`（`volume` 滤镜） |
+| 🗣️ TTS 解说音量 | 0 ~ 3.0 | 1.0 | `narration_volume` |
+
+**按钮绑定**（`app.py`）：`burn_button.click` 的 `inputs` 共 8 项 —— 文件夹、引擎、
+保留原声、字号、字体、位置、原声音量、解说音量，顺序与 `_burn_folder()` 签名一致。
+
+**旧版 ffmpeg 的对齐坑**（实测 git-2019 构建）：
+
+- 旧版按 **SSA 对齐表**解释 `Alignment`，与新版 ASS 数字键盘不同：
+  实测 `2`=底部居中（相同）、`6`=顶部居中、`10`=画面正中；新版是 `8`=顶、`5`=中。
+- `burner._position_params()` 内部用 `ffmpeg_version()` 判断，<4.4 走 `_LEGACY_ALIGN`，
+  否则走 `_MODERN_ALIGN`。版本探测兼容 `git-YYYY` 快照串（2021 及以后算新版）。
+
+**验证**：`font_size=36, font=SimHei, 顶部居中, orig=0.2, tts=1.5` 经 Gradio API
+调用 3 个视频全部成功，抽帧确认大字号黑体渲染在画面顶部。
+
+---
+
 ## 五、本机环境的三个坑（重要，换 / 重装环境时会再遇到）
 
 ### 坑 1：HuggingFace 完全不可达

@@ -11,6 +11,7 @@ except Exception:                                          # 兼容旧版 transf
 from qwen_vl_utils import process_vision_info
 from PIL import Image
 import time
+import burner  # 烧录模块：UI 下拉框需要读取 SUBTITLE_POSITIONS 的键名
 
 
 IMAGE_EXTENSIONS = ('.png', '.jpg', '.jpeg', '.bmp', '.gif', '.webp')
@@ -1172,7 +1173,7 @@ with gr.Blocks() as iface: # type: ignore
 
     # ================= 🎥 烧录字幕 + 语音旁白 =================
     # 独立于"开始处理"：对文件夹里已有 .srt 的视频逐个烧录硬字幕，
-    # 并把解说词用 TTS 合成旁白混进音轨（原声自动压低到 50%）。
+    # 并把解说词用 TTS 合成旁白混进音轨。字幕样式与音量均可在下方调节。
     gr.Markdown("### 🎥 合成旁白视频（烧录字幕 + TTS 解说）")
     gr.Markdown(
         "> 对上方文件夹内**已有 .srt** 的视频逐个处理，输出 `_旁白版.mp4`。\n"
@@ -1186,12 +1187,50 @@ with gr.Blocks() as iface: # type: ignore
             info="edge 走微软在线服务，失败会自动回退到 Windows 离线语音",
         )
         ui_e["keep_audio"] = gr.Checkbox(
-            label="保留视频原声（压低至 50%）", value=True
+            label="保留视频原声", value=True,
+            info="取消勾选则只保留 TTS 解说音轨",
         )
+
+    with gr.Accordion("🎨 字幕样式设置", open=True):
+        with gr.Row():
+            ui_e["sub_font_size"] = gr.Slider(
+                label="🔠 字幕大小",
+                minimum=8, maximum=96, value=20, step=1,
+                info="ASS 字号。1080p 竖屏建议 20~32；横屏 1080p 建议 28~44",
+            )
+            ui_e["sub_position"] = gr.Dropdown(
+                label="📍 字幕位置",
+                choices=list(burner.SUBTITLE_POSITIONS.keys()),
+                value="底部居中",
+            )
+        ui_e["sub_font_name"] = gr.Dropdown(
+            label="🔤 字体",
+            choices=[
+                "Microsoft YaHei", "Microsoft YaHei UI", "SimHei",
+                "SimSun", "KaiTi", "Source Han Sans CN", "Arial",
+            ],
+            value="Microsoft YaHei",
+            allow_custom_value=True,
+        )
+
+    with gr.Accordion("🔊 音量设置", open=True):
+        with gr.Row():
+            ui_e["orig_volume"] = gr.Slider(
+                label="🎬 视频原声音量",
+                minimum=0.0, maximum=2.0, value=0.5, step=0.05,
+                info="0 = 静音，0.5 = 压低一半（默认），1.0 = 原始音量",
+            )
+            ui_e["tts_volume"] = gr.Slider(
+                label="🗣️ TTS 解说的音量",
+                minimum=0.0, maximum=3.0, value=1.0, step=0.05,
+                info="1.0 = 原始大小；觉得解说太小声就调大",
+            )
+
     ui_e["burn_button"] = gr.Button("🎥 开始烧录字幕+旁白")
     burn_status = gr.Textbox(label="烧录状态", interactive=False)
 
-    def _burn_folder(folder, engine_choice, keep_audio):
+    def _burn_folder(folder, engine_choice, keep_audio, font_size,
+                     font_name, sub_position, orig_vol, tts_vol):
         """遍历文件夹，把已有 .srt 的视频烧录成带旁白的成片。生成器。"""
         import burner  # 延迟导入，加快启动
 
@@ -1226,6 +1265,13 @@ with gr.Blocks() as iface: # type: ignore
                 try:
                     burner.burn_subtitles_with_tts(
                         _v, _s, _o, engine=engine,
+                        # 字幕样式（来自 Web 端「字幕样式设置」）
+                        font_name=font_name,
+                        font_size=font_size,
+                        subtitle_position=sub_position,
+                        # 音量（来自 Web 端「音量设置」）
+                        original_volume=orig_vol,
+                        narration_volume=tts_vol,
                         keep_original_audio=keep_audio,
                         progress_cb=_cb,
                     )
@@ -1259,7 +1305,16 @@ with gr.Blocks() as iface: # type: ignore
 
     ui_e["burn_button"].click(
         _burn_folder,
-        inputs=[ui_e["folder_input"], ui_e["tts_engine"], ui_e["keep_audio"]],
+        inputs=[
+            ui_e["folder_input"],
+            ui_e["tts_engine"],
+            ui_e["keep_audio"],
+            ui_e["sub_font_size"],
+            ui_e["sub_font_name"],
+            ui_e["sub_position"],
+            ui_e["orig_volume"],
+            ui_e["tts_volume"],
+        ],
         outputs=[burn_status],
     )
 

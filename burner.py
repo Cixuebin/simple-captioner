@@ -40,6 +40,40 @@ def is_video(filename):
     return os.path.splitext(filename)[1].lower() in _VIDEO_EXTS
 
 
+# 字幕位置名 → 对齐表（值按 ffmpeg 版本在 _position_params 里选择）
+# 新版 ASS（numpad 对齐）：1~3 底部（左/中/右），4~6 中部，7~9 顶部
+_MODERN_ALIGN = {
+    "底部居中": (2, 28),
+    "底部靠左": (1, 28),
+    "底部靠右": (3, 28),
+    "画面正中": (5, 0),
+    "顶部居中": (8, 28),
+}
+# 旧版 SSA 对齐表（2019 ffmpeg 实测验证）：5~7 顶部，9~11 中部
+_LEGACY_ALIGN = {
+    "底部居中": (2, 28),
+    "底部靠左": (1, 28),
+    "底部靠右": (3, 28),
+    "画面正中": (10, 0),
+    "顶部居中": (6, 28),
+}
+
+# 供 Web UI 下拉框展示用（只取键名）
+SUBTITLE_POSITIONS = _MODERN_ALIGN
+
+
+def _position_params(name):
+    """把位置名转成 (Alignment, MarginV)，未知值退回底部居中。
+
+    注意：旧版 ffmpeg（< 4.4，如 2019 构建）内部按 SSA 对齐表解释
+    Alignment（实测 5=顶部、8=中部），与新版 ASS 不同，
+    所以这里按 ffmpeg 版本返回不同的 Alignment 值。
+    """
+    legacy = ffmpeg_version() < (4, 4)
+    table = _LEGACY_ALIGN if legacy else _MODERN_ALIGN
+    return table.get(name, table["底部居中"])
+
+
 def _no_window():
     """Windows 下隐藏子进程黑窗。"""
     if os.name == "nt":
@@ -53,7 +87,13 @@ _FFMPEG_VERSION = None
 
 
 def ffmpeg_version():
-    """返回 (major, minor)，用于按版本决定可用参数。"""
+    """返回 (major, minor)，用于按版本决定可用参数。
+
+    兼容两种版本串：
+      - 正式版：  "ffmpeg version 6.1.1 ..."          -> (6, 1)
+      - git 快照："ffmpeg version git-2019-10-22-..." -> 按日期年份估算
+        （ffmpeg 4.4 于 2021 年发布，git-2020 及更早按旧版处理）
+    """
     global _FFMPEG_VERSION
     if _FFMPEG_VERSION is None:
         try:
@@ -61,8 +101,15 @@ def ffmpeg_version():
                 [FFMPEG, "-version"], capture_output=True, text=True,
                 encoding="utf-8", errors="ignore", **_no_window(),
             )
-            m = re.search(r"ffmpeg version \S*?(\d+)\.(\d+)", r.stdout)
-            _FFMPEG_VERSION = (int(m.group(1)), int(m.group(2))) if m else (0, 0)
+            out = r.stdout
+            m = re.search(r"ffmpeg version (\d+)\.(\d+)", out)
+            if m:
+                _FFMPEG_VERSION = (int(m.group(1)), int(m.group(2)))
+            else:
+                # git 快照：取 "git-YYYY" 的年份粗略判断新旧
+                g = re.search(r"git-(\d{4})", out)
+                _FFMPEG_VERSION = ((99, 0) if g and int(g.group(1)) >= 2021
+                                   else (0, 0))
         except Exception:
             _FFMPEG_VERSION = (0, 0)
     return _FFMPEG_VERSION
@@ -222,9 +269,18 @@ def burn_subtitles_with_tts(video, srt, out_path,
                             voice="zh-CN-XiaoxiaoNeural",
                             font_name="Microsoft YaHei",
                             font_size=20,
+                            subtitle_position="底部居中",
+                            original_volume=0.5,
+                            narration_volume=1.0,
                             keep_original_audio=True,
                             progress_cb=None):
-    """把字幕烧录进画面，并把 TTS 旁白混进音轨。"""
+    """把字幕烧录进画面，并把 TTS 旁白混进音轨。
+
+    font_size         : 字幕字号（ASS 单位，视频高度 1/… 左右，常用 14~48）
+    original_volume   : 视频原声音量倍数（0~2，1.0 = 原始大小）
+    narration_volume  : TTS 解说音量倍数（0~3，1.0 = 原始大小）
+    subtitle_position : 字幕位置，见 SUBTITLE_POSITIONS
+    """
 
     def rep(stage, detail=""):
         print(f"[{stage}] {detail}")
@@ -237,6 +293,20 @@ def burn_subtitles_with_tts(video, srt, out_path,
     items = parse_srt(srt)
     if not items:
         raise RuntimeError(f"未能从 {srt} 解析出任何字幕")
+
+    # 参数兜底与范围钳制，避免 UI 传进非法值导致 ffmpeg 报错
+    try:
+        font_size = int(max(8, min(96, int(font_size))))
+    except (TypeError, ValueError):
+        font_size = 20
+    try:
+        original_volume = max(0.0, min(3.0, float(original_volume)))
+    except (TypeError, ValueError):
+        original_volume = 0.5
+    try:
+        narration_volume = max(0.0, min(3.0, float(narration_volume)))
+    except (TypeError, ValueError):
+        narration_volume = 1.0
 
     workdir = tempfile.mkdtemp(prefix="sc_burn_")
     try:
@@ -251,10 +321,11 @@ def burn_subtitles_with_tts(video, srt, out_path,
         safe_srt = os.path.join(workdir, "subs.srt")
         shutil.copyfile(srt, safe_srt)
         srt_esc = safe_srt.replace("\\", "/").replace(":", "\\:")
+        align, margin_v = _position_params(subtitle_position)
         style = (
             f"FontName={font_name},FontSize={font_size},"
             "PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,"
-            "BorderStyle=1,Outline=2,Shadow=1,MarginV=28"
+            f"BorderStyle=1,Outline=2,Shadow=1,Alignment={align},MarginV={margin_v}"
         )
         vf = f"subtitles='{srt_esc}':force_style='{style}'"
 
@@ -263,15 +334,15 @@ def burn_subtitles_with_tts(video, srt, out_path,
         # normalize 参数只在 ffmpeg 4.4+ 存在，老版本带上会直接报错
         no_norm = "" if ver >= (4, 4) else ""
         if keep_original_audio and has_audio_stream(video):
-            # 原声压低到 0.5、旁白保持 1.0，避免旁白被音乐盖住
+            # 原声与旁白各自按用户设定的音量混合
             cmd = [
                 FFMPEG, "-y",
                 "-i", video,
                 "-i", narration,
                 "-filter_complex",
                 f"[0:v]{vf}[v];"
-                f"[0:a]volume=0.5[oa];"
-                f"[1:a]volume=1.0[na];"
+                f"[0:a]volume={original_volume}[oa];"
+                f"[1:a]volume={narration_volume}[na];"
                 f"[oa][na]amix=inputs=2:duration=first{no_norm}[a]",
                 "-map", "[v]", "-map", "[a]",
                 "-c:v", "libx264", "-preset", "medium", "-crf", "20",
@@ -281,12 +352,14 @@ def burn_subtitles_with_tts(video, srt, out_path,
                 out_path,
             ]
         else:
+            # 不保留原声（或视频本就没有音轨）时，只用旁白
             cmd = [
                 FFMPEG, "-y",
                 "-i", video,
                 "-i", narration,
-                "-filter_complex", f"[0:v]{vf}[v]",
-                "-map", "[v]", "-map", "1:a",
+                "-filter_complex",
+                f"[0:v]{vf}[v];[1:a]volume={narration_volume}[a]",
+                "-map", "[v]", "-map", "[a]",
                 "-c:v", "libx264", "-preset", "medium", "-crf", "20",
                 "-pix_fmt", "yuv420p",
                 "-c:a", "aac", "-b:a", "192k",
