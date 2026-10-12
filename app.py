@@ -1170,6 +1170,99 @@ with gr.Blocks() as iface: # type: ignore
     )
     time_display = gr.Textbox(label="⏱️ 总耗时 (mm:ss)", interactive=False)
 
+    # ================= 🎥 烧录字幕 + 语音旁白 =================
+    # 独立于"开始处理"：对文件夹里已有 .srt 的视频逐个烧录硬字幕，
+    # 并把解说词用 TTS 合成旁白混进音轨（原声自动压低到 50%）。
+    gr.Markdown("### 🎥 合成旁白视频（烧录字幕 + TTS 解说）")
+    gr.Markdown(
+        "> 对上方文件夹内**已有 .srt** 的视频逐个处理，输出 `_旁白版.mp4`。\n"
+        "> 需要 ffmpeg（自动探测；也可用环境变量 `SC_FFMPEG` 指定路径）。"
+    )
+    with gr.Row():
+        ui_e["tts_engine"] = gr.Radio(
+            label="🗣️ 旁白语音引擎",
+            choices=["edge（在线·音质好）", "sapi（离线·机械音）"],
+            value="edge（在线·音质好）",
+            info="edge 走微软在线服务，失败会自动回退到 Windows 离线语音",
+        )
+        ui_e["keep_audio"] = gr.Checkbox(
+            label="保留视频原声（压低至 50%）", value=True
+        )
+    ui_e["burn_button"] = gr.Button("🎥 开始烧录字幕+旁白")
+    burn_status = gr.Textbox(label="烧录状态", interactive=False)
+
+    def _burn_folder(folder, engine_choice, keep_audio):
+        """遍历文件夹，把已有 .srt 的视频烧录成带旁白的成片。生成器。"""
+        import burner  # 延迟导入，加快启动
+
+        engine = "sapi" if engine_choice.startswith("sapi") else "edge"
+        if not folder or not os.path.isdir(folder):
+            yield "⚠️ 请先在上方填一个有效的文件夹路径。"
+            return
+
+        # 收集待处理对 (视频, srt)
+        pairs = []
+        for root, _dirs, files in os.walk(folder):
+            for fn in files:
+                if not burner.is_video(fn):
+                    continue
+                srt = os.path.join(root, os.path.splitext(fn)[0] + ".srt")
+                if os.path.exists(srt):
+                    pairs.append((os.path.join(root, fn), srt))
+        if not pairs:
+            yield "⚠️ 文件夹里没有找到「视频 + 同名 .srt」的组合。请先跑一次字幕处理。"
+            return
+
+        yield f"⏳ 共找到 {len(pairs)} 个待烧录视频，开始处理 ..."
+        ok, fail = 0, 0
+        for i, (video, srt) in enumerate(pairs):
+            out = os.path.splitext(video)[0] + "_旁白版.mp4"
+            q = queue.Queue()
+
+            def _cb(stage, detail, _q=q):
+                _q.put(f"{stage}:{detail}")
+
+            def _run(_v=video, _s=srt, _o=out):
+                try:
+                    burner.burn_subtitles_with_tts(
+                        _v, _s, _o, engine=engine,
+                        keep_original_audio=keep_audio,
+                        progress_cb=_cb,
+                    )
+                    q.put("__ok__")
+                except Exception as exc:
+                    q.put(f"__err__ {exc}")
+
+            worker = threading.Thread(target=_run, daemon=True)
+            worker.start()
+            t0 = time.time()
+            while True:
+                try:
+                    msg = q.get(timeout=2.0)
+                except queue.Empty:
+                    yield (f"⚙️ [{i+1}/{len(pairs)}] 处理中: "
+                           f"{os.path.basename(video)}（已用 {time.time()-t0:.0f}s）")
+                    continue
+                if msg == "__ok__":
+                    ok += 1
+                    yield f"✅ [{i+1}/{len(pairs)}] 完成: {os.path.basename(out)}"
+                    break
+                if msg.startswith("__err__"):
+                    fail += 1
+                    yield (f"⚠️ [{i+1}/{len(pairs)}] 失败: "
+                           f"{os.path.basename(video)} -> {msg[7:]}")
+                    break
+                stage, _, detail = msg.partition(":")
+                yield f"⚙️ [{i+1}/{len(pairs)}] {detail or stage}"
+
+        yield f"🏁 烧录结束：成功 {ok}，失败 {fail}。"
+
+    ui_e["burn_button"].click(
+        _burn_folder,
+        inputs=[ui_e["folder_input"], ui_e["tts_engine"], ui_e["keep_audio"]],
+        outputs=[burn_status],
+    )
+
     with gr.Row():
         with gr.Column(scale=1):
             media_output = gr.Image(label="Current Image", interactive=False)

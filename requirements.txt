@@ -19,5 +19,12 @@ av>=12.0.0
 # 模型下载（ModelScope，替代不可达的 HuggingFace）
 modelscope
 
+# 旁白视频合成（🎥 烧录字幕 + TTS 解说）：
+#   edge-tts  -> 微软在线语音（音质好，需联网；被代理拦截时自动回退 sapi）
+#   pywin32   -> Windows 离线 SAPI 语音（Huihui 中文女声）
+#   另需 ffmpeg（含 libass/subtitles 滤镜），路径用环境变量 SC_FFMPEG 指定
+edge-tts>=7.0.0
+pywin32>=306; sys_platform == "win32"
+
 # 可选：Windows 上通常装不上，改用 eager attention 即可
 # flash-attn>=2.7.4.post1
