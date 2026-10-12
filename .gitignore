@@ -1,0 +1,75 @@
+# ============================================================
+#  Simple Captioner  -  .gitignore
+#  GitHub 只托管"源码"。模型、虚拟环境、wheel 包等大文件一律不上传。
+# ============================================================
+
+# ---------- 1. 模型权重（17 GB，绝对不要传）----------
+# 模型由 download_model.py 从 ModelScope 下载，可随时重建。
+models/
+*.safetensors
+*.bin
+*.pt
+*.pth
+*.ckpt
+*.onnx
+
+# ---------- 2. Python 虚拟环境（4.3 GB）----------
+# 由 setup.bat / requirements.txt 重建，且和操作系统/显卡绑定。
+venv/
+.venv/
+env/
+ENV/
+*env/
+!requirements.txt
+
+# ---------- 3. 预先下载的 wheel 包（1.9 GB）----------
+# torch 的 CUDA wheel 近 2GB，由 fetch_wheel.py 按需下载。
+wheels/
+*.whl
+
+# ---------- 4. Python 缓存与编译产物 ----------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# ---------- 5. 运行日志与临时文件 ----------
+*.log
+_app.log
+probe*.log
+*.tmp
+*.bak
+*.bak_*
+~$*
+
+# ---------- 6. 处理产物（.txt 字幕会被写到媒体文件旁边）----------
+# 除非你的素材就在仓库目录里，否则一般不需要传。
+# 如果你确实想把示例输出一起传，删掉下面这行即可。
+# *.txt
+!requirements.txt
+
+# ---------- 7. 编辑器 / IDE ----------
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---------- 8. 密钥与本地配置 ----------
+.env
+.env.*
+*.key
+*.pem
+secrets.json
+config.local.*
+
+# ---------- 9. Gradio 缓存 ----------
+.gradio/
+flagged/

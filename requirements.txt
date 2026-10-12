@@ -1,0 +1,23 @@
+# Simple Captioner 依赖清单
+# 注意：torch / torchvision 需要 CUDA 版，请用 setup.bat 安装，
+#       或手动指定 --index-url https://download.pytorch.org/whl/cu130
+#       （清华源的 torch 是 CPU-only 版，装了显卡也跑不起来）
+
+gradio>=6.10.0
+Pillow>=11.2.1
+qwen_vl_utils>=0.0.11
+transformers>=5.4.0
+accelerate>=0.26.0
+bitsandbytes>=0.46.1
+hf_xet>=1.1.10
+
+# PyAV：视频解码核心依赖。
+# torchvision 0.19+ 移除了 io.read_video，qwen_vl_utils 读视频会全线失败，
+# 本项目改用 PyAV 解码（app.py 的 decode_video_frames）。缺了它视频功能不可用。
+av>=12.0.0
+
+# 模型下载（ModelScope，替代不可达的 HuggingFace）
+modelscope
+
+# 可选：Windows 上通常装不上，改用 eager attention 即可
+# flash-attn>=2.7.4.post1
