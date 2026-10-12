@@ -108,6 +108,56 @@ venv\Scripts\python.exe test_run.py
 
 ---
 
+## 四·补 2、📊 实时进度反馈（处理过程可见）
+
+**问题背景**：原版点下 `🚀 Start Processing` 后界面**毫无反应**，直到全部跑完才一次性刷出结果。
+处理一个文件夹可能要几分钟，用户完全不知道"是不是卡住了"。
+
+**修复后行为**：点下按钮后界面**持续刷新**（实测首个事件 0.1s 内出现）。
+
+| 界面元素 | 说明 |
+|---|---|
+| **📊 总进度 (%)** | 0 → 100，按文件数推进 |
+| **⏱️ 总耗时 (mm:ss)** | 从点下按钮开始计时 |
+| **状态栏** | 显示第几个文件 + 当前阶段 + 已用时 |
+
+单个文件内部还会按阶段细分进度权重（`STAGE_WEIGHT`）：
+
+```
+解码抽帧 decode       → 10%
+构建输入 build        → 20%
+模型推理 generate     → 85%   （每秒心跳刷新"已用时 Ns"）
+收尾 decode_text      → 100%
+```
+
+**同一文件内**的进度会在这几个权重点之间平滑插值，所以进度条不会长时间静止。
+推理阶段每 2 秒产出一个心跳事件，即使单条视频要跑 40 秒，界面也一直在动。
+
+**实测数据**（RTX A6000 48GB / 8-bit / 3 段共约 57 秒的视频）：
+
+| 文件 | 进度区间 | 耗时 |
+|---|---|---|
+| 1/3 沙滩排球 22.0s | 0 → 33 | 41.4s（推理 37.7s） |
+| 2/3 跳台跳水 15.9s | 33 → 66 | 28.0s（推理 25.5s） |
+| 3/3 video_1080p 18.9s | 66 → 100 | 34.4s（推理 31.3s） |
+
+整批共 **123 次进度刷新**，总耗时 **01:43**。
+
+**实现要点**（改代码时注意）：
+
+1. `generate_caption()` 新增 `progress_callback` 参数，内部通过 `report(stage, detail)`
+   在 4 个阶段上报进度。
+2. **`model.generate()` 被放进后台线程**（daemon thread），主线程用 `queue.Queue`
+   轮询结果。这样主线程才能一边等推理、一边 `yield` 心跳事件给前端。
+   直接把 `generate()` 写在生成器里是**不行的** —— 它会阻塞到出结果为止。
+3. `process_folder()` 是**生成器**，用 `yield` 逐条推送。开头先 `yield` 一次"开始处理"，
+   让用户立刻看到反馈。
+4. **必须加 `iface.queue(default_concurrency_limit=1)`**（`app.py` 末尾 `launch()` 之前）。
+   少了这一句，Gradio 不会把生成器的中间 `yield` 流到前端，界面会一直转圈到全部结束才显示。
+   这是最容易漏掉的一步。
+
+---
+
 ## 五、本机环境的三个坑（重要，换 / 重装环境时会再遇到）
 
 ### 坑 1：HuggingFace 完全不可达
@@ -315,6 +365,7 @@ venv\Scripts\python.exe test_video.py D:\a.mp4   # 指定任意视频
 | `app.py` | `_ui_load_model` 改为生成器（加载中即时反馈）；页面顶部新增操作顺序提示（见坑 6） |
 | `app.py` | 新增字幕解说模式：`SUBTITLE_PROMPT_VIDEO/IMAGE`、`suggest_segment_count()`、`generate_caption(..., subtitle_mode=)`、`process_folder(..., subtitle_mode=)`、UI 勾选框 `🎬 字幕解说模式`（见"四·补"） |
 | `app.py` | `decode_video_frames()` 返回值增加 `duration`（字幕需真实时长） |
+| `app.py` | 新增实时进度反馈：`generate_caption(..., progress_callback=)`、`model.generate()` 移入后台线程 + `queue.Queue` 心跳、`process_folder()` 改生成器流式 `yield`、`STAGE_WEIGHT` 阶段加权、UI 新增 `📊 总进度 (%)` / `⏱️ 总耗时`、`launch()` 前加 `iface.queue(default_concurrency_limit=1)`（见"四·补 2"） |
 | `app.py` | `launch()` 加 `inbrowser=True`，启动后自动打开浏览器 |
 | `venv/.../pip/_internal/network/session.py` | 替换 User-Agent（见坑 2） |
 | 新增 `download_model.py` / `.bat` | ModelScope 模型下载 |

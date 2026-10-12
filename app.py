@@ -1,4 +1,6 @@
 import os
+import queue
+import threading
 import torch
 import gradio as gr
 from transformers import BitsAndBytesConfig
@@ -296,10 +298,24 @@ def get_model_info():
 print("[DEBUG] Cuda available:", torch.cuda.is_available())
 
 def generate_caption(media_path, prompt, max_tokens, summary_mode=False, one_sentence_mode=False,
-                     resolution_mode="auto", subtitle_mode=False):
+                     resolution_mode="auto", subtitle_mode=False, progress_callback=None):
+    """生成一个媒体文件的描述/字幕。
+
+    progress_callback: 可选回调，签名 (stage: str, detail: str) -> None。
+        用于向界面上报当前阶段，让用户在处理长视频时能看到进度。
+        阶段：decode（解码/抽帧）、build（构建输入）、generate（模型推理）、decode_text（整理输出）
+    """
     global processor, model
     assert model is not None, "Model must be loaded before generating captions."
     assert processor is not None, "Processor must be loaded before generating captions."
+
+    def report(stage, detail=""):
+        """安全上报进度：回调异常不能影响主流程。"""
+        if progress_callback is not None:
+            try:
+                progress_callback(stage, detail)
+            except Exception:
+                pass
 
     ext = os.path.splitext(media_path)[-1].lower()
     is_video = ext in VIDEO_EXTENSIONS
@@ -308,8 +324,11 @@ def generate_caption(media_path, prompt, max_tokens, summary_mode=False, one_sen
     video_meta = None
     video_duration = None
     if is_video:
+        report("decode", "正在解码视频并抽取关键帧 ...")
         # 用 PyAV 解码成帧列表（规避 torchvision 0.29 已移除 read_video 的坑）
         media_data, sample_fps, video_duration = decode_video_frames(media_path)
+        report("decode", f"已抽取 {len(media_data)} 帧"
+                         + (f"（时长 {video_duration:.1f}s）" if video_duration else ""))
         # 把真实时间轴告诉 processor，否则它会按默认 24fps 走，时间戳全错
         if VideoMetadata is not None:
             video_meta = [VideoMetadata(
@@ -321,6 +340,7 @@ def generate_caption(media_path, prompt, max_tokens, summary_mode=False, one_sen
                 height=media_data[0].height,
             )]
     else:
+        report("decode", "正在读取图片 ...")
         media_data = Image.open(media_path).convert("RGB")
 
     # ---- 构建最终提示词 ----
@@ -361,6 +381,7 @@ def generate_caption(media_path, prompt, max_tokens, summary_mode=False, one_sen
             content_block["resized_width"] = 728
 
 
+    report("build", "正在构建模型输入 ...")
     messages = [
         {
             "role": "user",
@@ -414,9 +435,37 @@ def generate_caption(media_path, prompt, max_tokens, summary_mode=False, one_sen
     inputs = processor(**proc_kwargs).to("cuda")
 
 
-    with torch.no_grad():
-        generated_ids = model.generate(**inputs, max_new_tokens=max_tokens)
+    report("generate", "正在运行模型推理 ...")
+    # 关键：model.generate() 是同步阻塞调用，长视频可能跑 30~60 秒。
+    # 放进后台线程执行，主线程定期上报心跳，这样界面上能看到"已用时"持续增长，
+    # 而不是整段卡死毫无反馈。
+    holder = {"ids": None, "err": None, "done": False}
 
+    def _run_generate():
+        try:
+            with torch.no_grad():
+                holder["ids"] = model.generate(**inputs, max_new_tokens=max_tokens)
+        except Exception as exc:          # 线程内异常要带回主线程再抛
+            holder["err"] = exc
+        finally:
+            holder["done"] = True
+
+    worker = threading.Thread(target=_run_generate, daemon=True)
+    worker.start()
+
+    t_gen = time.time()
+    while not holder["done"]:
+        worker.join(timeout=2.0)          # 每 2 秒醒一次，上报一次心跳
+        if not holder["done"]:
+            report("generate", f"正在运行模型推理 ... 已用时 {time.time() - t_gen:.0f}s")
+
+    if holder["err"] is not None:
+        raise holder["err"]
+
+    generated_ids = holder["ids"]
+    report("generate", f"推理完成，用时 {time.time() - t_gen:.1f}s")
+
+    report("decode_text", "正在整理输出文本 ...")
     generated_ids_trimmed = [
         out_ids[len(in_ids):] for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
     ]
@@ -565,15 +614,16 @@ def process_folder(folder_path, prompt, skip_existing, max_tokens, summary_mode,
     elapsed_str = ""
 
     # ---- 前置检查：模型未就绪时给出明确提示，避免逐文件误报"文件损坏" ----
+    # 判据以"模型是否真的在内存里"为准（model is None），
+    # 布尔标志 model_loading 只用于区分"正在加载"与"从未加载"两种情况。
     if model is None or processor is None:
         control_updates = finish_process()
         if model_loading:
-            msg = ("⏳ Model is still loading, please wait... "
-                   "(the model auto-loads on startup and takes ~40s; "
-                   "do NOT click Start Processing until the status bar shows the model is ready)")
+            msg = ("⏳ 模型正在加载中，请稍候……"
+                   "（8B 模型约需 30~60 秒，加载完成前请勿点击开始处理）")
         else:
-            msg = ("⚠️ No model loaded. Please click \"📦 Load / Reload Model\" first, "
-                   "then wait until loading finishes before clicking Start Processing.")
+            msg = ("⚠️ 模型尚未加载。请先点击【📦 Load / Reload Model】按钮，"
+                   "等状态栏显示 Ready 后再点击【🚀 Start Processing】。")
         yield (
             msg,
             None,
@@ -693,10 +743,109 @@ def process_folder(folder_path, prompt, skip_existing, max_tokens, summary_mode,
                 )
                 continue
 
-            # 解说字幕模式下，多段解说需要更长输出，自动抬高上限（至少 512 tokens）
-            eff_max_tokens = max(max_tokens, 512) if subtitle_mode else max_tokens
-            caption = generate_caption(media_path, prompt, eff_max_tokens, summary_mode,
-                                       one_sentence_mode, resolution_mode, subtitle_mode)
+            # ---- 处理前先上报一次，让用户立刻看到"正在处理第 N/M 个" ----
+            # 这是修复"看不到进度"的关键：原版是等 generate 跑完才 yield，
+            # 长视频时界面会几十秒毫无反馈。这里先 yield 一次，界面立即有响应。
+            control_updates = start_process()
+            progress = int((idx / total_media) * 100)
+            elapsed = int(time.time() - start_time)
+            elapsed_str = f"{elapsed//60:02d}:{elapsed%60:02d}"
+            yield (
+                f"⏳ [{idx+1}/{total_media}] 开始处理: {rel_path}",
+                last_media_to_show if retain_preview else None,
+                media_name_markdown,
+                "⏳ 处理中 ...",
+                progress,
+                elapsed_str,
+                *control_updates
+            )
+
+            # ---- 用队列接收 generate_caption 的阶段回调，边跑边刷新界面 ----
+            # generate_caption 在工作线程里跑，回调把状态写进队列；
+            # 主线程轮询队列，一有新状态就 yield，实现细粒度进度更新。
+            stage_q = queue.Queue()
+            result_holder = {"caption": None, "error": None, "done": False}
+
+            # 各阶段在"当前文件内部"的完成占比，用于让进度条平滑推进：
+            # 只有一个视频时，若只按文件数算会一直停在 0%，用户仍会觉得没进展。
+            STAGE_WEIGHT = {
+                "decode": 0.10,
+                "build": 0.20,
+                "generate": 0.85,   # 推理是最耗时的一步，占据主要权重
+                "decode_text": 1.0,
+            }
+            stage_ratio = 0.0
+
+            def _overall_progress():
+                """把"已完成文件数 + 当前文件内部进度"折算成 0~100 的总进度。"""
+                within = (idx + stage_ratio) / max(1, total_media)
+                return max(0, min(100, int(within * 100)))
+
+            def _on_progress(stage, detail):
+                # 该回调运行在工作线程中，只做入队，不做任何 UI 操作
+                stage_q.put((stage, detail))
+
+            def _run_caption():
+                try:
+                    # 解说字幕模式下，多段解说需要更长输出，自动抬高上限（至少 512 tokens）
+                    eff_tokens = max(max_tokens, 512) if subtitle_mode else max_tokens
+                    result_holder["caption"] = generate_caption(
+                        media_path, prompt, eff_tokens, summary_mode,
+                        one_sentence_mode, resolution_mode, subtitle_mode,
+                        progress_callback=_on_progress,
+                    )
+                except Exception as exc:
+                    result_holder["error"] = exc
+                finally:
+                    result_holder["done"] = True
+                    stage_q.put(("__done__", ""))
+
+            cap_worker = threading.Thread(target=_run_caption, daemon=True)
+            cap_worker.start()
+
+            t_item = time.time()
+            while not result_holder["done"]:
+                try:
+                    stage, detail = stage_q.get(timeout=1.0)
+                except queue.Empty:
+                    # 没有新阶段消息：上报一次心跳，让用户看到计时在走
+                    elapsed_now = time.time() - t_item
+                    elapsed = int(time.time() - start_time)
+                    elapsed_str = f"{elapsed//60:02d}:{elapsed%60:02d}"
+                    yield (
+                        f"⚙️ [{idx+1}/{total_media}] 处理中: {rel_path} "
+                        f"（当前文件已用 {elapsed_now:.0f}s）",
+                        last_media_to_show if retain_preview else None,
+                        media_name_markdown,
+                        f"⚙️ 处理中 ... 当前文件已用 {elapsed_now:.0f}s",
+                        _overall_progress(),
+                        elapsed_str,
+                        *control_updates
+                    )
+                    continue
+
+                if stage == "__done__":
+                    break
+
+                # 记录当前文件内部进度，让总进度条平滑推进而非长时间停滞
+                stage_ratio = STAGE_WEIGHT.get(stage, stage_ratio)
+                elapsed = int(time.time() - start_time)
+                elapsed_str = f"{elapsed//60:02d}:{elapsed%60:02d}"
+                yield (
+                    f"⚙️ [{idx+1}/{total_media}] {detail}",
+                    last_media_to_show if retain_preview else None,
+                    media_name_markdown,
+                    f"⚙️ {detail}",
+                    _overall_progress(),
+                    elapsed_str,
+                    *control_updates
+                )
+
+            # 等线程真正结束，取出结果或抛出异常
+            cap_worker.join()
+            if result_holder["error"] is not None:
+                raise result_holder["error"]
+            caption = result_holder["caption"]
 
             # Only generate previews for images
             if is_image_file(media_path):
@@ -744,24 +893,29 @@ def process_folder(folder_path, prompt, skip_existing, max_tokens, summary_mode,
             )
 
     end_time = time.time()
-    total_time = f"{end_time - start_time:.2f}"
-
+    total_secs = end_time - start_time
+    total_time = f"{total_secs:.2f}"
+    elapsed_str = f"{int(total_secs)//60:02d}:{int(total_secs)%60:02d}"
 
     control_updates = finish_process()
+    # 汇总消息：中文 + 信息完整（总数/成功/跳过/失败/总耗时）
+    head = f"✅ 处理完成！共 {total_media} 个文件"
+    detail = (f"成功 {processed_media}，跳过 {skipped_media}，失败 {failed_media}，"
+              f"总耗时 {elapsed_str}")
     if failed_media > 0:
         # 有失败时，把真实错误原因带出来，而不是笼统地说"文件损坏"
-        summary = (f"⚠️ Done. processed {processed_media}, skipped {skipped_media}, "
-                   f"failed {failed_media}. First error -> {first_error}")
+        summary = f"{head}；{detail}。首个错误 -> {first_error}"
     else:
-        summary = (f"✅ Processing complete! , processed {processed_media} media in {elapsed_str}, "
-                   f"skipped {skipped_media} media. Failed to process {failed_media} media")
+        summary = f"{head}；{detail}。"
+
+    # 完成时进度条置为 100，避免停在未满状态让用户误以为还没跑完
     yield (
         summary,
         last_media_to_show,
         last_media_name_markdown,
         last_caption,
-        None,
-        None,
+        100,
+        elapsed_str,
         *control_updates
     )
 
@@ -882,8 +1036,13 @@ with gr.Blocks() as iface: # type: ignore
         ui_e["abort_button"] = gr.Button("⛔ Abort", interactive=False)
 
     ui_e["status_output"] = gr.Textbox(label="Status", interactive=False)
-    progress_bar = gr.Slider(minimum=0, maximum=100, label="Progress", interactive=False)
-    time_display = gr.Textbox(label="⏱️ Time Taken (s)", interactive=False)
+    progress_bar = gr.Slider(
+        minimum=0, maximum=100, value=0, step=1,
+        label="📊 总进度 (%)",
+        info="按文件数统计。单个文件处理中的实时步骤请看上方 Status。",
+        interactive=False,
+    )
+    time_display = gr.Textbox(label="⏱️ 总耗时 (mm:ss)", interactive=False)
 
     with gr.Row():
         with gr.Column(scale=1):
@@ -970,4 +1129,13 @@ with gr.Blocks() as iface: # type: ignore
 if __name__ == "__main__":
     # 直接用 python app.py / run_app.bat 启动时才起服务；
     # 被 import 时（如 test_run.py 自检）只构建 UI，不启动服务器。
-    iface.launch(share=False, theme=gr.themes.Base(), css=css, inbrowser=True)
+    #
+    # enable_queue / queue 显式打开：process_folder 是生成器，靠 yield 逐步推送进度，
+    # 队列关闭时这些中间状态会被合并，界面就看不到实时进度了。
+    iface.queue(default_concurrency_limit=1)
+    iface.launch(
+        share=False,
+        theme=gr.themes.Base(),
+        css=css,
+        inbrowser=True,
+    )
