@@ -70,6 +70,9 @@ desktop.ini
 secrets.json
 config.local.*
 
+# 界面参数记忆（各人机器上的偏好，不该进仓库）
+settings.json
+
 # ---------- 9. Gradio 缓存 ----------
 .gradio/
 flagged/

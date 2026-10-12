@@ -1,6 +1,7 @@
 import os
 import queue
 import threading
+import json
 import torch
 import gradio as gr
 from transformers import BitsAndBytesConfig
@@ -20,6 +21,92 @@ DEFAULT_PROMPT = "Describe this media."
 DEFAULT_MODEL_ID = "Qwen/Qwen3-VL-8B-Instruct"
 DEFAULT_QUANT = "8-bit"  # "None" | "8-bit" | "4-bit"
 DEFAULT_ATTN = "eager" if os.name == "nt" else "flash_attention_2"
+
+# ---------------------------------------------------------------------------
+# 参数记忆（把界面上的设置持久化到 JSON，下次打开自动回填）
+# ---------------------------------------------------------------------------
+SETTINGS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                             "settings.json")
+
+# 界面上所有希望被记住的控件，以及它们的出厂默认值。
+# 新增可持久化的控件时，只要在这里加一行即可。
+DEFAULT_SETTINGS = {
+    "folder_input": "",
+    "tts_engine": "edge（在线·音质好）",
+    "keep_audio": True,
+    "sub_font_size": 20,
+    "sub_position": "底部居中",
+    "sub_font_name": "Microsoft YaHei",
+    "sub_outline": True,
+    "sub_outline_width": 2,
+    "sub_opacity": 1.0,
+    "orig_volume": 0.5,
+    "tts_volume": 1.0,
+}
+
+# 控件在界面上的**实际出现顺序**（= 注册 save_settings/reset_settings 时
+# inputs/outputs 的顺序）。必须与 _settings_widgets 严格一致，否则参数会写串。
+SAVE_ORDER = [
+    "folder_input",
+    "tts_engine",
+    "keep_audio",
+    "sub_font_size",
+    "sub_position",
+    "sub_font_name",
+    "sub_outline",
+    "sub_outline_width",
+    "sub_opacity",
+    "orig_volume",
+    "tts_volume",
+]
+
+
+def load_settings():
+    """读取上次保存的设置；文件不存在或损坏时返回默认值。"""
+    data = dict(DEFAULT_SETTINGS)
+    try:
+        with open(SETTINGS_PATH, encoding="utf-8") as f:
+            saved = json.load(f)
+        if isinstance(saved, dict):
+            # 只接受已知的键，避免旧文件里的脏数据干扰
+            for k in DEFAULT_SETTINGS:
+                if k in saved:
+                    data[k] = saved[k]
+    except FileNotFoundError:
+        pass
+    except Exception as exc:
+        print(f"[WARN] 读取 settings.json 失败，使用默认设置：{exc}")
+    return data
+
+
+def save_settings(*values):
+    """把界面当前值写入 settings.json。
+
+    **注意**：这里按 SAVE_ORDER 的键名与界面控件一一对应，不用位置硬编码，
+    避免以后调整界面顺序时把参数写串。
+    写成"生成器 + 先 yield 后落盘"是为了让界面立刻收到回执，
+    并把可能出现的写盘异常通过同一个输出框反馈出来。
+    """
+    yield "💾 正在保存设置 ..."
+    data = {k: v for k, v in zip(SAVE_ORDER, values)}
+    try:
+        with open(SETTINGS_PATH, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        yield f"✅ 设置已保存，下次打开自动生效。"
+    except Exception as exc:
+        yield f"⚠️ 保存失败：{exc}"
+
+
+def reset_settings():
+    """恢复出厂默认值（仅回填界面，不立刻写盘）。"""
+    d = DEFAULT_SETTINGS
+    # 输出顺序必须与 _settings_widgets 完全一致
+    vals = []
+    for key in SAVE_ORDER:
+        vals.append(d[key])
+    vals.append("↩️ 已恢复默认值（点「💾 保存当前设置」后才会写入文件）")
+    return tuple(vals)
+
 
 # ---------------------------------------------------------------------------
 # 中文解说字幕模式
@@ -1179,15 +1266,19 @@ with gr.Blocks() as iface: # type: ignore
         "> 对上方文件夹内**已有 .srt** 的视频逐个处理，输出 `_旁白版.mp4`。\n"
         "> 需要 ffmpeg（自动探测；也可用环境变量 `SC_FFMPEG` 指定路径）。"
     )
+
+    # 读取上次保存的设置，初始化时直接回填到各控件
+    _saved = load_settings()
+
     with gr.Row():
         ui_e["tts_engine"] = gr.Radio(
             label="🗣️ 旁白语音引擎",
             choices=["edge（在线·音质好）", "sapi（离线·机械音）"],
-            value="edge（在线·音质好）",
+            value=_saved["tts_engine"],
             info="edge 走微软在线服务，失败会自动回退到 Windows 离线语音",
         )
         ui_e["keep_audio"] = gr.Checkbox(
-            label="保留视频原声", value=True,
+            label="保留视频原声", value=_saved["keep_audio"],
             info="取消勾选则只保留 TTS 解说音轨",
         )
 
@@ -1195,13 +1286,13 @@ with gr.Blocks() as iface: # type: ignore
         with gr.Row():
             ui_e["sub_font_size"] = gr.Slider(
                 label="🔠 字幕大小",
-                minimum=8, maximum=96, value=20, step=1,
+                minimum=8, maximum=96, value=_saved["sub_font_size"], step=1,
                 info="ASS 字号。1080p 竖屏建议 20~32；横屏 1080p 建议 28~44",
             )
             ui_e["sub_position"] = gr.Dropdown(
                 label="📍 字幕位置",
                 choices=list(burner.SUBTITLE_POSITIONS.keys()),
-                value="底部居中",
+                value=_saved["sub_position"],
             )
         ui_e["sub_font_name"] = gr.Dropdown(
             label="🔤 字体",
@@ -1209,23 +1300,23 @@ with gr.Blocks() as iface: # type: ignore
                 "Microsoft YaHei", "Microsoft YaHei UI", "SimHei",
                 "SimSun", "KaiTi", "Source Han Sans CN", "Arial",
             ],
-            value="Microsoft YaHei",
+            value=_saved["sub_font_name"],
             allow_custom_value=True,
         )
         with gr.Row():
             ui_e["sub_outline"] = gr.Checkbox(
                 label="🖊️ 字幕描边（黑边）",
-                value=True,
+                value=_saved["sub_outline"],
                 info="取消勾选则只有纯色文字，无黑边",
             )
             ui_e["sub_outline_width"] = gr.Slider(
                 label="🖊️ 描边粗细",
-                minimum=0, maximum=4, value=2, step=1,
+                minimum=0, maximum=4, value=_saved["sub_outline_width"], step=1,
                 info="仅在上方勾选描边时生效",
             )
         ui_e["sub_opacity"] = gr.Slider(
             label="🫥 字幕不透明度",
-            minimum=0.0, maximum=1.0, value=1.0, step=0.05,
+            minimum=0.0, maximum=1.0, value=_saved["sub_opacity"], step=0.05,
             info="1.0 = 完全不透明；0.6 左右可让字幕透出画面",
         )
 
@@ -1233,14 +1324,23 @@ with gr.Blocks() as iface: # type: ignore
         with gr.Row():
             ui_e["orig_volume"] = gr.Slider(
                 label="🎬 视频原声音量",
-                minimum=0.0, maximum=2.0, value=0.5, step=0.05,
+                minimum=0.0, maximum=2.0, value=_saved["orig_volume"], step=0.05,
                 info="0 = 静音，0.5 = 压低一半（默认），1.0 = 原始音量",
             )
             ui_e["tts_volume"] = gr.Slider(
                 label="🗣️ TTS 解说的音量",
-                minimum=0.0, maximum=3.0, value=1.0, step=0.05,
+                minimum=0.0, maximum=3.0, value=_saved["tts_volume"], step=0.05,
                 info="1.0 = 原始大小；觉得解说太小声就调大",
             )
+
+    # 参数记忆：保存 / 恢复默认 两个按钮 + 一个回执框
+    with gr.Row():
+        ui_e["save_settings_button"] = gr.Button("💾 保存当前设置", size="sm")
+        ui_e["reset_settings_button"] = gr.Button("↩️ 恢复默认值", size="sm")
+    settings_status = gr.Textbox(
+        label="设置状态", interactive=False, max_lines=1,
+        placeholder="调好参数后点「保存当前设置」，下次打开会自动回填",
+    )
 
     ui_e["burn_button"] = gr.Button("🎥 开始烧录字幕+旁白")
     burn_status = gr.Textbox(label="烧录状态", interactive=False)
@@ -1339,6 +1439,35 @@ with gr.Blocks() as iface: # type: ignore
             ui_e["sub_opacity"],
         ],
         outputs=[burn_status],
+    )
+
+    # ---- 参数记忆：保存 / 恢复默认 ----
+    # 顺序必须与 SAVE_ORDER 严格一致（否则参数会写串）。
+    _settings_widgets = [
+        ui_e["folder_input"],
+        ui_e["tts_engine"],
+        ui_e["keep_audio"],
+        ui_e["sub_font_size"],
+        ui_e["sub_position"],
+        ui_e["sub_font_name"],
+        ui_e["sub_outline"],
+        ui_e["sub_outline_width"],
+        ui_e["sub_opacity"],
+        ui_e["orig_volume"],
+        ui_e["tts_volume"],
+    ]
+    assert [w.label for w in _settings_widgets] and len(_settings_widgets) == len(SAVE_ORDER)
+    ui_e["save_settings_button"].click(
+        save_settings,
+        inputs=_settings_widgets,
+        outputs=[settings_status],
+        queue=False,
+    )
+    ui_e["reset_settings_button"].click(
+        reset_settings,
+        inputs=[],
+        outputs=_settings_widgets + [settings_status],
+        queue=False,
     )
 
     with gr.Row():
