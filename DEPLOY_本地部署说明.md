@@ -227,11 +227,14 @@ SRT 时间码语法严格（`HH:MM:SS,mmm`，**必须逗号**、**必须补零�
 | 🔠 字幕大小 | 8 ~ 96 | 20 | `font_size`（ASS 字号，受 PlayRes 缩放） |
 | 📍 字幕位置 | 底部居中/靠左/靠右、画面正中、顶部居中 | 底部居中 | `subtitle_position` |
 | 🔤 字体 | 下拉 + 可手输 | Microsoft YaHei | `font_name` |
+| 🖊️ 字幕描边 | 开/关 + 粗细 0~4 | 开 / 2 | `outline_enabled` / `outline_width` |
+| 🫥 字幕不透明度 | 0 ~ 1.0 | 1.0 | `text_opacity`（ASS alpha 反算） |
 | 🎬 视频原声音量 | 0 ~ 2.0 | 0.5 | `original_volume`（`volume` 滤镜） |
 | 🗣️ TTS 解说音量 | 0 ~ 3.0 | 1.0 | `narration_volume` |
 
-**按钮绑定**（`app.py`）：`burn_button.click` 的 `inputs` 共 8 项 —— 文件夹、引擎、
-保留原声、字号、字体、位置、原声音量、解说音量，顺序与 `_burn_folder()` 签名一致。
+**按钮绑定**（`app.py`）：`burn_button.click` 的 `inputs` 共 11 项 —— 文件夹、引擎、
+保留原声、字号、字体、位置、原声音量、解说音量、描边开关、描边粗细、不透明度，
+顺序与 `_burn_folder()` 签名一致。
 
 **旧版 ffmpeg 的对齐坑**（实测 git-2019 构建）：
 

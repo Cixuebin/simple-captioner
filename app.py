@@ -1212,6 +1212,22 @@ with gr.Blocks() as iface: # type: ignore
             value="Microsoft YaHei",
             allow_custom_value=True,
         )
+        with gr.Row():
+            ui_e["sub_outline"] = gr.Checkbox(
+                label="🖊️ 字幕描边（黑边）",
+                value=True,
+                info="取消勾选则只有纯色文字，无黑边",
+            )
+            ui_e["sub_outline_width"] = gr.Slider(
+                label="🖊️ 描边粗细",
+                minimum=0, maximum=4, value=2, step=1,
+                info="仅在上方勾选描边时生效",
+            )
+        ui_e["sub_opacity"] = gr.Slider(
+            label="🫥 字幕不透明度",
+            minimum=0.0, maximum=1.0, value=1.0, step=0.05,
+            info="1.0 = 完全不透明；0.6 左右可让字幕透出画面",
+        )
 
     with gr.Accordion("🔊 音量设置", open=True):
         with gr.Row():
@@ -1230,7 +1246,8 @@ with gr.Blocks() as iface: # type: ignore
     burn_status = gr.Textbox(label="烧录状态", interactive=False)
 
     def _burn_folder(folder, engine_choice, keep_audio, font_size,
-                     font_name, sub_position, orig_vol, tts_vol):
+                     font_name, sub_position, orig_vol, tts_vol,
+                     outline_enabled, outline_width, text_opacity):
         """遍历文件夹，把已有 .srt 的视频烧录成带旁白的成片。生成器。"""
         import burner  # 延迟导入，加快启动
 
@@ -1269,6 +1286,9 @@ with gr.Blocks() as iface: # type: ignore
                         font_name=font_name,
                         font_size=font_size,
                         subtitle_position=sub_position,
+                        outline_enabled=outline_enabled,
+                        outline_width=outline_width,
+                        text_opacity=text_opacity,
                         # 音量（来自 Web 端「音量设置」）
                         original_volume=orig_vol,
                         narration_volume=tts_vol,
@@ -1314,6 +1334,9 @@ with gr.Blocks() as iface: # type: ignore
             ui_e["sub_position"],
             ui_e["orig_volume"],
             ui_e["tts_volume"],
+            ui_e["sub_outline"],
+            ui_e["sub_outline_width"],
+            ui_e["sub_opacity"],
         ],
         outputs=[burn_status],
     )

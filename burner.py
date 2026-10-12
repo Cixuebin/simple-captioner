@@ -273,6 +273,9 @@ def burn_subtitles_with_tts(video, srt, out_path,
                             original_volume=0.5,
                             narration_volume=1.0,
                             keep_original_audio=True,
+                            outline_enabled=True,
+                            outline_width=2,
+                            text_opacity=1.0,
                             progress_cb=None):
     """把字幕烧录进画面，并把 TTS 旁白混进音轨。
 
@@ -280,6 +283,9 @@ def burn_subtitles_with_tts(video, srt, out_path,
     original_volume   : 视频原声音量倍数（0~2，1.0 = 原始大小）
     narration_volume  : TTS 解说音量倍数（0~3，1.0 = 原始大小）
     subtitle_position : 字幕位置，见 SUBTITLE_POSITIONS
+    outline_enabled   : 是否给字幕加描边（黑边）
+    outline_width     : 描边粗细（0~4，仅 outline_enabled=True 时生效）
+    text_opacity      : 字幕不透明度（0~1，0=全透明、1=完全不透明）
     """
 
     def rep(stage, detail=""):
@@ -307,6 +313,14 @@ def burn_subtitles_with_tts(video, srt, out_path,
         narration_volume = max(0.0, min(3.0, float(narration_volume)))
     except (TypeError, ValueError):
         narration_volume = 1.0
+    try:
+        outline_width = int(max(0, min(4, int(outline_width))))
+    except (TypeError, ValueError):
+        outline_width = 2
+    try:
+        text_opacity = max(0.0, min(1.0, float(text_opacity)))
+    except (TypeError, ValueError):
+        text_opacity = 1.0
 
     workdir = tempfile.mkdtemp(prefix="sc_burn_")
     try:
@@ -322,10 +336,21 @@ def burn_subtitles_with_tts(video, srt, out_path,
         shutil.copyfile(srt, safe_srt)
         srt_esc = safe_srt.replace("\\", "/").replace(":", "\\:")
         align, margin_v = _position_params(subtitle_position)
+        # ASS 颜色格式 &HAABBGGRR，AA 是不透明度且 00=不透明、FF=全透明，需要反过来。
+        alpha = int(round((1.0 - text_opacity) * 255))
+        alpha = max(0, min(255, alpha))
+        # 描边：关掉描边时把 Outline 与 Shadow 都设为 0，避免残留黑边。
+        if outline_enabled and outline_width > 0:
+            outline_w, shadow_w = outline_width, 0
+        else:
+            outline_w, shadow_w = 0, 0
         style = (
             f"FontName={font_name},FontSize={font_size},"
-            "PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,"
-            f"BorderStyle=1,Outline=2,Shadow=1,Alignment={align},MarginV={margin_v}"
+            f"PrimaryColour=&H{alpha:02X}FFFFFF,"
+            f"OutlineColour=&H{alpha:02X}000000,"
+            "BorderStyle=1,"
+            f"Outline={outline_w},Shadow={shadow_w},"
+            f"Alignment={align},MarginV={margin_v}"
         )
         vf = f"subtitles='{srt_esc}':force_style='{style}'"
 
