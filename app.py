@@ -57,6 +57,96 @@ def suggest_segment_count(duration):
     return max(4, min(24, n))
 
 
+# ---------------------------------------------------------------------------
+# SRT 字幕转换
+# 设计取舍：模型只输出好写的 `[起-止] 文本`，由代码转成严格的 SRT 语法。
+# 这样时间码由程序精确计算（不会多个/少个 0、不会用错分隔符），
+# 模型只需专注"看懂画面 + 写好解说词"这一件它擅长的事。
+# ---------------------------------------------------------------------------
+import re  # noqa: E402  （放在此处是为了就近说明转换逻辑的依赖）
+
+# 匹配形如 [0.0-3.2] 解说词 / 0.0-3.2 解说词 / [0.0 - 3.2] 解说词 的各种写法。
+# 兼容要点：
+#   - 行首可能有模型自作主张加上的序号（如 "1. " / "1、" / "1)"），需容忍
+#   - 连接符可能是半角 (-) 或全角/en-dash/em-dash/波浪号 (– — ～ ~)
+_SUBTITLE_LINE_RE = re.compile(
+    r"^\s*(?:\d+\s*[.、)．]\s*)?"          # 可选行首序号
+    r"[\[【]?\s*"                          # 可选左括号（兼容全角【）
+    r"(\d+(?:\.\d+)?)\s*[-–—~～]\s*(\d+(?:\.\d+)?)\s*"
+    r"[\]】]?\s*"                          # 可选右括号
+    r"(.+?)\s*$"                           # 解说词
+)
+
+
+def seconds_to_srt_timecode(seconds):
+    """把秒数转成 SRT 时间码：HH:MM:SS,mmm（例如 3.2 → 00:00:03,200）。
+
+    注意 SRT 用**逗号**分隔毫秒，且时分秒必须补足两位。
+    """
+    try:
+        total_ms = int(round(float(seconds) * 1000))
+    except (TypeError, ValueError):
+        total_ms = 0
+    if total_ms < 0:
+        total_ms = 0
+    hours, rem = divmod(total_ms, 3600 * 1000)
+    minutes, rem = divmod(rem, 60 * 1000)
+    secs, millis = divmod(rem, 1000)
+    return f"{hours:02d}:{minutes:02d}:{secs:02d},{millis:03d}"
+
+
+def caption_to_srt(caption):
+    """把模型输出的 `[起-止] 解说词` 文本转换成标准 SRT 字幕。
+
+    返回 (srt_text, segment_count)；
+    若一行都没解析出来，返回 (None, 0)，调用方应回退到写 .txt。
+    """
+    if not caption:
+        return None, 0
+
+    segments = []
+    for raw_line in caption.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        m = _SUBTITLE_LINE_RE.match(line)
+        if not m:
+            continue
+        start, end, text = m.group(1), m.group(2), m.group(3).strip()
+        if not text:
+            continue
+        # 去掉模型偶尔加上的行首序号（如 "1. " 或 "1、"）
+        text = re.sub(r"^\d+\s*[.、)]\s*", "", text).strip()
+        if not text:
+            continue
+        segments.append((float(start), float(end), text))
+
+    if not segments:
+        return None, 0
+
+    # 按开始时间排序，并修正明显不合理的时间区间（起 >= 止 或 倒退）
+    segments.sort(key=lambda x: x[0])
+    fixed = []
+    prev_end = 0.0
+    for start, end, text in segments:
+        if start < prev_end:
+            start = prev_end
+        if end <= start:
+            end = start + 1.0          # 至少给 1 秒，避免零长度字幕
+        fixed.append((start, end, text))
+        prev_end = end
+
+    blocks = []
+    for i, (start, end, text) in enumerate(fixed, start=1):
+        blocks.append(
+            f"{i}\n"
+            f"{seconds_to_srt_timecode(start)} --> {seconds_to_srt_timecode(end)}\n"
+            f"{text}"
+        )
+    # SRT 规范：每个字幕块之间空一行，文件末尾留一个换行
+    return "\n\n".join(blocks) + "\n", len(fixed)
+
+
 PRESETS = {
     "auto": {
         "min_pixels": 256 * 28 * 28,
@@ -719,13 +809,20 @@ def process_folder(folder_path, prompt, skip_existing, max_tokens, summary_mode,
             )
             return
         try:
-            txt_filename = os.path.splitext(os.path.basename(media_path))[0] + ".txt"
-            txt_path = os.path.join(os.path.dirname(media_path), txt_filename)
+            # 输出文件：
+            #   字幕解说模式 + 视频 → 同名 .srt（标准字幕文件，播放器/剪辑软件可直接识别）
+            #   其它情况（图片 / 关闭字幕模式） → 同名 .txt
+            base_name = os.path.splitext(os.path.basename(media_path))[0]
+            out_dir = os.path.dirname(media_path)
+            txt_path = os.path.join(out_dir, base_name + ".txt")
+            srt_path = os.path.join(out_dir, base_name + ".srt")
+            use_srt = subtitle_mode and is_video_file(media_path)
+            primary_path = srt_path if use_srt else txt_path
 
             rel_path = os.path.relpath(media_path, folder_path)
             media_name_markdown = f"**File:** `{rel_path}`"
 
-            if skip_existing and os.path.exists(txt_path):
+            if skip_existing and os.path.exists(primary_path):
                 progress = int(((idx + 1) / total_media) * 100)
                 elapsed = int(time.time() - start_time)
                 elapsed_str = f"{elapsed//60:02d}:{elapsed%60:02d}"
@@ -853,8 +950,27 @@ def process_folder(folder_path, prompt, skip_existing, max_tokens, summary_mode,
             else:
                 media_to_show = None
 
-            with open(txt_path, "w", encoding="utf-8") as f:
-                f.write(caption)
+            # ---- 写文件 ----
+            # 字幕模式下的视频：把 `[起-止] 文本` 转成标准 SRT 写 .srt。
+            # 若一行都没解析出来（模型没按格式输出），回退写 .txt，避免产生空文件。
+            written_path = txt_path
+            extra_note = ""
+            if use_srt:
+                srt_text, seg_count = caption_to_srt(caption)
+                if srt_text:
+                    with open(srt_path, "w", encoding="utf-8") as f:
+                        f.write(srt_text)
+                    written_path = srt_path
+                    extra_note = f" · 已生成 SRT（{seg_count} 条字幕）"
+                else:
+                    with open(txt_path, "w", encoding="utf-8") as f:
+                        f.write(caption)
+                    written_path = txt_path
+                    extra_note = " · ⚠️ 未识别到时间轴，已回退为 .txt"
+                    print(f"[WARN] SRT 转换失败，回退写 .txt: {txt_path}")
+            else:
+                with open(txt_path, "w", encoding="utf-8") as f:
+                    f.write(caption)
 
             progress = int(((idx + 1) / total_media) * 100)
             elapsed = int(time.time() - start_time)
@@ -865,8 +981,10 @@ def process_folder(folder_path, prompt, skip_existing, max_tokens, summary_mode,
             last_media_name_markdown = media_name_markdown
             processed_media += 1
             control_updates = start_process()
+            icon = "🎬" if written_path.endswith(".srt") else "🖼️"
             yield (
-                f"🖼️ Processing {idx+1}/{total_media}: {rel_path}",
+                f"{icon} [{idx+1}/{total_media}] 完成: {rel_path} "
+                f"→ {os.path.basename(written_path)}{extra_note}",
                 media_to_show,
                 media_name_markdown,
                 caption,
@@ -1001,18 +1119,26 @@ with gr.Blocks() as iface: # type: ignore
         ui_e["folder_input"] = gr.Textbox(label="📁 Folder Path", placeholder="e.g. C:\\Users\\you\\Pictures\\input_images")
         ui_e["prompt_input"] = gr.Textbox(label="Custom Prompt", value=DEFAULT_PROMPT)
 
-    ui_e["skip_existing_checkbox"] = gr.Checkbox(label="Skip already captioned media (.txt exists)", value=False)
+    ui_e["skip_existing_checkbox"] = gr.Checkbox(
+        label="Skip already captioned media (同名 .srt / .txt 已存在则跳过)", value=False
+    )
+
 
     with gr.Row():
         gr.Markdown("### Prompt Controls")
         gr.Markdown("""
         - **Summary Mode**: Asks the model to summarize the media content briefly.
         - **One-Sentence Mode**: Instructs the model to keep the caption to a single concise sentence.
-        - **字幕解说模式 (Subtitle)**: 输出中文解说字幕；视频按真实时间轴分段，格式 `[起-止] 解说词`，可直接做字幕。
+        - **字幕解说模式 (Subtitle)**: 输出中文解说字幕；视频生成标准 `.srt` 字幕文件（序号 + 时间码 `00:00:00,000 --> 00:00:03,200`），播放器/剪辑软件可直接加载。
         """)
         ui_e["summary_mode"] = gr.Checkbox(label="Summary Mode", value=False)
         ui_e["one_sentence_mode"] = gr.Checkbox(label="One-Sentence Mode", value=False)
-        ui_e["subtitle_mode"] = gr.Checkbox(label="🎬 字幕解说模式（中文·带时间轴）", value=True)
+        ui_e["subtitle_mode"] = gr.Checkbox(
+            label="🎬 字幕解说模式（中文·视频导出 .srt）",
+            value=True,
+            info="勾选后：视频 → 同名 .srt 标准字幕；图片 → 同名 .txt 单句解说",
+        )
+
 
     prompt_preview = gr.Textbox(
         label="Final Prompt Preview",
