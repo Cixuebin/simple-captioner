@@ -330,6 +330,10 @@ SRT 时间码语法严格（`HH:MM:SS,mmm`，必须逗号、必须补零），�
 - **参数记忆的顺序坑**：`save_settings`/`reset_settings` 按界面控件顺序收值，
   键名映射靠 `SAVE_ORDER` 列表对应。**调整界面控件顺序时必须同步改
   `SAVE_ORDER` 和 `_settings_widgets`**，否则参数会写串（曾实测踩坑）
+- **Gradio 生成器必须走队列**：`queue=False` 的事件**不支持生成器** ——
+  函数里写 `yield` 的话，界面只会收到第一条消息就永远停住，后面的代码
+  根本不执行（表现为点「保存当前设置」一直卡在"正在保存"）。
+  → 保存这类毫秒级同步操作直接用普通函数 `return` 最终结果
 - SAPI 输出 mono/22050Hz，edge-tts 输出 24000Hz
   → 混音前用 `aresample=44100` + `aformat` 统一
 

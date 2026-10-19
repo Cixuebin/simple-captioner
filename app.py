@@ -80,21 +80,37 @@ def load_settings():
 
 
 def save_settings(*values):
-    """把界面当前值写入 settings.json。
+    """把界面当前值写入 settings.json，返回回执文本。
 
-    **注意**：这里按 SAVE_ORDER 的键名与界面控件一一对应，不用位置硬编码，
+    **必须写成普通函数**：Gradio 里 `queue=False` 的事件不支持生成器 ——
+    若在这里用 yield，界面只会收到第一条"正在保存"就停住，后面的写盘
+    代码永远不会执行（曾经踩过这个坑）。
+    写盘是毫秒级操作，不需要中间状态。
+
+    按 SAVE_ORDER 的键名与界面控件一一对应，不用位置硬编码，
     避免以后调整界面顺序时把参数写串。
-    写成"生成器 + 先 yield 后落盘"是为了让界面立刻收到回执，
-    并把可能出现的写盘异常通过同一个输出框反馈出来。
     """
-    yield "💾 正在保存设置 ..."
-    data = {k: v for k, v in zip(SAVE_ORDER, values)}
+    # 参数个数对不上说明界面绑定和 SAVE_ORDER 脱节，直接报错而不是写脏数据
+    if len(values) != len(SAVE_ORDER):
+        return (f"⚠️ 保存失败：参数数量不匹配（收到 {len(values)} 项，"
+                f"需要 {len(SAVE_ORDER)} 项），请检查界面绑定顺序。")
+
+    data = dict(zip(SAVE_ORDER, values))
+    tmp_path = SETTINGS_PATH + ".tmp"
     try:
-        with open(SETTINGS_PATH, "w", encoding="utf-8") as f:
+        # 先写临时文件再原子替换：避免写到一半中断导致配置损坏
+        with open(tmp_path, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
-        yield f"✅ 设置已保存，下次打开自动生效。"
+        os.replace(tmp_path, SETTINGS_PATH)
+        return f"✅ 设置已保存（{time.strftime('%H:%M:%S')}），下次打开自动生效。"
     except Exception as exc:
-        yield f"⚠️ 保存失败：{exc}"
+        # 清理可能残留的临时文件，避免下次误读
+        try:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except Exception:
+            pass
+        return f"⚠️ 保存失败：{exc}"
 
 
 def reset_settings():
