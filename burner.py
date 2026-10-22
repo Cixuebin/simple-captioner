@@ -233,33 +233,68 @@ def build_narration_track(items, workdir, engine="edge",
     for i, (start, end, text) in enumerate(items):
         raw = os.path.join(workdir, f"v{i}.mp3")
         path, used = synth_voice(text, raw, engine=engine, voice=voice)
-        clips.append((start, path, used, text))
+        # 读取本条语音实际时长，用于推算整条音轨的总长
+        dur = probe_duration(path)
+        clips.append((start, path, used, text, dur if dur else 10.0))
         print(f"  [TTS] #{i+1} @{start:.1f}s ({used}) {text}")
 
-    # 用 ffmpeg 把每条 clip 延迟后混合。用 adelay + amix。
+    # 用 ffmpeg 把每条 clip 延迟后混合。
     # aresample 统一采样率，否则 SAPI(22050) 与 edge-tts(24000) 混在一起会出声学问题。
+    #
+    # ⚠️ ffmpeg 3.x 的 amix 会在**第一个输入流结束时**直接掐断输出，
+    # duration=longest 参数形同虚设（实测 3.0 复现：后几条延迟过的语音全部丢失，
+    # 表现为"只有第一句有声音"）。
+    # 对策：用 apad=whole_len 把每条 clip 都补齐静音到同一总长，
+    # 所有输入同时结束，amix 就能跑满全程。
+    total_sec = max(s + d for s, _p, _u, _t, d in clips) + 0.5   # 留 0.5s 收尾余量
+    total_samples = int(total_sec * 44100)
+
     inputs = []
     filters = []
-    for i, (start, path, _u, _t) in enumerate(clips):
+    for i, (start, path, _u, _t, _d) in enumerate(clips):
         inputs += ["-i", path]
         delay_ms = int(start * 1000)
-        filters.append(
+        # 注意：声道转换不能用 aformat=channel_layouts=stereo——
+        # 它做 mono->stereo 上混时自带 -3dB 衰减（实测 0.506 -> 0.359），
+        # 改用 pan 等增益复制，响度不损失。
+        chain = (
             f"[{i}:a]aresample=44100,"
-            f"aformat=sample_fmts=fltp:channel_layouts=stereo,"
-            f"adelay={delay_ms}|{delay_ms}[a{i}]"
+            f"aformat=sample_fmts=fltp,"
+            f"pan=stereo|c0=c0|c1=c0"
         )
+        # adelay 在「所有延迟都 <= 0」时会被 ffmpeg 拒绝：
+        #   ffmpeg 3.x -> "At least one delay >0 must be specified"
+        # 而首条字幕起点通常正好是 0.0s，所以延迟为 0 时必须**跳过**该滤镜，
+        # 不能写成 adelay=0|0（否则整条混音命令失败、产物是 0 字节文件）。
+        if delay_ms > 0:
+            chain += f",adelay={delay_ms}|{delay_ms}"
+        chain += f",apad=whole_len={total_samples}"
+        # amix 固定按 1/N 缩放每个输入（无 normalize 参数可关），
+        # 因此每条都预先放大 N 倍补回；重叠时段峰值可能瞬时超 1，
+        # 由编码器钳制，可接受。
+        chain += f",volume={len(clips)}"
+        filters.append(chain + f"[a{i}]")
     mix_in = "".join(f"[a{i}]" for i in range(len(clips)))
-    # 注意：老版本 ffmpeg（2019 前后）的 amix 不支持 normalize 参数，
-    # 一旦带上会直接报 "Option 'normalize' not found" 而整条命令失败。
-    # 用 volume 手动控制音量即可，兼容性最好。
-    filters.append(
-        f"{mix_in}amix=inputs={len(clips)}:duration=longest[out]"
-    )
+    if len(clips) == 1:
+        # 只有一条语音时不必走 amix，直接透传（amix inputs=1 在老版本上不保险）
+        filters.append("[a0]anull[out]")
+    else:
+        # 注意：老版本 ffmpeg（2019 前后）的 amix 不支持 normalize 参数，
+        # 一旦带上会直接报 "Option 'normalize' not found" 而整条命令失败。
+        filters.append(
+            f"{mix_in}amix=inputs={len(clips)}:duration=longest[out]"
+        )
     track = os.path.join(workdir, "narration.m4a")
     cmd = ([FFMPEG, "-y"] + inputs +
            ["-filter_complex", ";".join(filters), "-map", "[out]",
             "-c:a", "aac", "-b:a", "192k", track])
-    subprocess.run(cmd, capture_output=True, **_no_window())
+    r = subprocess.run(cmd, capture_output=True, text=True,
+                       encoding="utf-8", errors="ignore", **_no_window())
+    # 必须检查返回值：否则失败时只留下一个 0 字节文件，
+    # 下一步读它会报 "moov atom not found"，错误信息完全指错方向。
+    if r.returncode != 0 or not os.path.exists(track) or os.path.getsize(track) == 0:
+        print(r.stderr[-2000:])
+        raise RuntimeError("旁白音轨合成失败（ffmpeg 见上方日志）")
     return track
 
 
