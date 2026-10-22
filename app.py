@@ -18,8 +18,10 @@ import burner  # 烧录模块：UI 下拉框需要读取 SUBTITLE_POSITIONS 的�
 IMAGE_EXTENSIONS = ('.png', '.jpg', '.jpeg', '.bmp', '.gif', '.webp')
 VIDEO_EXTENSIONS = ('.mp4', '.mov', '.avi', '.webm', '.mkv', ".gif", ".flv")
 DEFAULT_PROMPT = "Describe this media."
-DEFAULT_MODEL_ID = "Qwen/Qwen3-VL-8B-Instruct"
-DEFAULT_QUANT = "8-bit"  # "None" | "8-bit" | "4-bit"
+# 本机部署适配：GTX 1660 只有 6GB 显存，8B 模型 8-bit 需 8.5GB 放不下，
+# 因此默认改为 4B + 4-bit（约 3GB，可完整驻留显存）
+DEFAULT_MODEL_ID = "Qwen/Qwen3-VL-4B-Instruct"
+DEFAULT_QUANT = "4-bit"  # "None" | "8-bit" | "4-bit"
 DEFAULT_ATTN = "eager" if os.name == "nt" else "flash_attention_2"
 
 # ---------------------------------------------------------------------------
