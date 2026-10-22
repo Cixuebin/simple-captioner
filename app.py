@@ -1221,8 +1221,17 @@ with gr.Blocks() as iface: # type: ignore
         dtype_display = gr.Textbox(label="Torch Dtype", interactive=False)
         config_display = gr.Textbox(label="Model Config", interactive=False, lines=4)
 
+    # 读取上次保存的设置，供后续所有控件初始值使用。
+    # 必须放在第一个需要回填的控件（文件夹路径）之前 —— 之前写在烧录区，
+    # 导致 folder_input 构造时还没读到配置，路径永远回填不了。
+    _saved = load_settings()
+
     with gr.Row():
-        ui_e["folder_input"] = gr.Textbox(label="📁 Folder Path", placeholder="e.g. C:\\Users\\you\\Pictures\\input_images")
+        ui_e["folder_input"] = gr.Textbox(
+            label="📁 Folder Path",
+            value=_saved["folder_input"],
+            placeholder="e.g. C:\\Users\\you\\Pictures\\input_images",
+        )
         ui_e["prompt_input"] = gr.Textbox(label="Custom Prompt", value=DEFAULT_PROMPT)
 
     ui_e["skip_existing_checkbox"] = gr.Checkbox(
@@ -1285,8 +1294,7 @@ with gr.Blocks() as iface: # type: ignore
         "> 需要 ffmpeg（自动探测；也可用环境变量 `SC_FFMPEG` 指定路径）。"
     )
 
-    # 读取上次保存的设置，初始化时直接回填到各控件
-    _saved = load_settings()
+    # 注：_saved 已在文件夹输入框之前读取（见上方），这里不再重复 load
 
     with gr.Row():
         ui_e["tts_engine"] = gr.Radio(
